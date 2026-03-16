@@ -1985,22 +1985,27 @@
     document.getElementById('duetBoothStatusText').textContent = text;
   }
 
+  const ICE_CONFIG = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'turn:openrelay.metered.ca:80',                username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443',               username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+    ]
+  };
+
   // ─── Lobby: create room ──────────────────────────────────────
   function duetCreate() {
     duetRole = 'host';
     const code = genRoomCode();
 
-    // Show room card, hide options
     document.getElementById('duetOptions').style.display = 'none';
     document.getElementById('duetRoomCard').classList.add('visible');
     document.getElementById('duetRoomCode').textContent = code;
-    setDuetStatus('initialising connection…', 'waiting');
+    setDuetStatus('opening room…', 'waiting');
 
-    // Init PeerJS with the room code as our ID
-    duetPeer = new Peer('duet-' + code, {
-      host: '0.peerjs.com', port: 443, path: '/', secure: true,
-      config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }, { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }, { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }] }
-    });
+    duetPeer = new Peer('duet-' + code, { config: ICE_CONFIG });
 
     duetPeer.on('open', () => {
       setDuetStatus('room open — share the code', 'waiting');
@@ -2008,9 +2013,8 @@
 
     duetPeer.on('error', (err) => {
       if (err.type === 'unavailable-id') {
-        // Code collision — retry
         duetPeer.destroy();
-        duetCreate();
+        duetCreate(); // retry with new code
       } else {
         setDuetStatus('connection error — try again', 'error');
       }
@@ -2018,10 +2022,8 @@
 
     duetPeer.on('connection', (conn) => {
       duetConn = conn;
+      setDuetStatus('partner found — establishing link…', 'waiting');
       setupDuetConnection();
-      setDuetStatus('partner connected!', 'connected');
-      // Show filter section for host to pick
-      document.getElementById('duetFilterSection').style.display = 'block';
     });
   }
 
@@ -2042,19 +2044,20 @@
     setDuetStatus('connecting…', 'waiting');
     document.getElementById('duetJoinInput').disabled = true;
 
-    duetPeer = new Peer({
-      host: '0.peerjs.com', port: 443, path: '/', secure: true,
-      config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }, { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }, { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }] }
-    });
+    duetPeer = new Peer({ config: ICE_CONFIG });
 
     duetPeer.on('open', () => {
-      const conn = duetPeer.connect('duet-' + raw, { reliable: true });
+      setDuetStatus('reached server — dialling host…', 'waiting');
+      const conn = duetPeer.connect('duet-' + raw, { reliable: true, serialization: 'json' });
       duetConn = conn;
       setupDuetConnection();
     });
 
-    duetPeer.on('error', () => {
-      setDuetStatus('could not reach that room', 'error');
+    duetPeer.on('error', (err) => {
+      const msg = err.type === 'peer-unavailable'
+        ? 'room not found — check the code'
+        : 'could not connect — try again';
+      setDuetStatus(msg, 'error');
       document.getElementById('duetJoinInput').disabled = false;
     });
   }
@@ -2063,15 +2066,16 @@
   function setupDuetConnection() {
     duetConn.on('open', () => {
       if (duetRole === 'guest') {
-        setDuetStatus('connected! waiting for host…', 'connected');
-        // Guest sees filter section as read-only (host controls it)
+        // Send a hello so host knows the data channel is truly open
+        sendDuet({ type: 'hello' });
+        setDuetStatus('connected! waiting for host to pick filter…', 'connected');
         document.getElementById('duetFilterSection').style.display = 'block';
         document.getElementById('duetStartBtn').style.display = 'none';
-        // Disable guest filter cards
         document.querySelectorAll('#duetFilterGrid .filter-card').forEach(c => {
           c.style.pointerEvents = 'none'; c.style.opacity = '0.5';
         });
       }
+      // Host side is handled when it receives 'hello'
     });
 
     duetConn.on('data', (data) => {
@@ -2082,6 +2086,10 @@
       setDuetStatus('partner disconnected', 'error');
       setDuetBoothStatus('partner disconnected');
     });
+
+    duetConn.on('error', (err) => {
+      setDuetStatus('connection lost — try again', 'error');
+    });
   }
 
   // ─── Messaging ───────────────────────────────────────────────
@@ -2091,6 +2099,16 @@
 
   function handleDuetMessage(msg) {
     switch (msg.type) {
+
+      case 'hello':
+        // Guest's data channel is truly open — host can now show filter section
+        if (duetRole === 'host') {
+          setDuetStatus('partner connected!', 'connected');
+          document.getElementById('duetFilterSection').style.display = 'block';
+          // Send current filter back so guest preview updates
+          sendDuet({ type: 'filter', filter: duetFilter });
+        }
+        break;
       case 'filter':
         duetFilter = msg.filter;
         selectedFilter = duetFilter;
